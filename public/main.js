@@ -18,6 +18,10 @@ let mode = 'login';
 let accessToken = null;
 let me = null;
 let home = null;
+let selectedThreadIndex = 0;
+const savedThreads = new Set(JSON.parse(localStorage.getItem('savedThreads') || '[]'));
+const watchedMatches = new Set(JSON.parse(localStorage.getItem('watchedMatches') || '[]'));
+
 
 function md(text) {
   return text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br/>');
@@ -50,8 +54,18 @@ function relativeTime(iso) {
 }
 
 function pulse(matches) {
-  pulseBar.innerHTML = matches.map((m) => `<div class="pulse-item" data-id="${m.id}">${m.status} • ${m.teams[0].short} ${m.score[0]}-${m.score[1]} ${m.teams[1].short}</div>`).join('');
-  pulseBar.querySelectorAll('.pulse-item').forEach((el) => el.addEventListener('click', () => renderMatch(el.dataset.id)));
+  pulseBar.innerHTML = matches.map((m) => `<div class="pulse-item" data-id="${m.id}">${m.status} • ${m.teams[0].short} ${m.score[0]}-${m.score[1]} ${m.teams[1].short} <button data-watch-match="${m.id}">${watchedMatches.has(m.id) ? 'Unwatch' : 'Watch'}</button></div>`).join('');
+  pulseBar.querySelectorAll('.pulse-item').forEach((el) => el.addEventListener('click', (event) => {
+    if (event.target.matches('[data-watch-match]')) return;
+    renderMatch(el.dataset.id);
+  }));
+  pulseBar.querySelectorAll('[data-watch-match]').forEach((btn) => btn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const id = btn.dataset.watchMatch;
+    if (watchedMatches.has(id)) watchedMatches.delete(id); else watchedMatches.add(id);
+    localStorage.setItem('watchedMatches', JSON.stringify(Array.from(watchedMatches)));
+    pulse(matches);
+  }));
 }
 
 function modActions(thread) {
@@ -72,25 +86,29 @@ function threadRow(thread) {
       <div>${thread.is_locked ? '🔒' : ''}</div>
       <div>
         <a href="#thread/${thread.id}"><strong>${thread.title}</strong></a>
-        <div class="meta">u/${author.username} <span class="badge ${author.role}">${author.role}</span> • ${relativeTime(thread.created_at)}${banned}</div>
+        <div class="meta">u/${author.username} <span class="badge ${author.role}">${author.role}</span> • ${relativeTime(thread.created_at)}${banned} • heat ${thread.heat || 0}</div>
       </div>
-      <div>${modActions(thread)}</div>
+      <div><button data-save-thread="${thread.id}">${savedThreads.has(thread.id) ? 'Unsave' : 'Save'}</button> ${modActions(thread)}</div>
     </div>`;
 }
 
 function renderHome() {
   view.innerHTML = `
     <div class="panel">
+      <h2>Match Summaries</h2>
+      ${(home.summaries || []).map((thread) => `<div class="section"><a href="#thread/${thread.id}"><strong>${thread.title}</strong></a><div class="meta">${thread.author?.username || 'unknown'} • ▲${thread.score}</div></div>`).join('') || '<div class="section">No summaries yet.</div>'}
       <h2>Hot Threads</h2>
       ${home.threads.map(threadRow).join('') || '<div class="section">No threads yet.</div>'}
     </div>`;
   bindThreadActions();
+  highlightThreadSelection();
 }
 
 function commentTree(comments, parent = null) {
   return comments.filter((c) => c.parent_id === parent).map((c) => {
     const author = c.author || { username: 'unknown', role: 'user' };
-    return `<div class="comment ${c.collapsedByDefault ? 'collapsed' : ''}"><div><strong>u/${author.username}</strong> <span class="badge ${author.role}">${author.role}</span> ▲${c.score}</div><div>${c.body}</div>${commentTree(comments, c.id)}</div>`;
+    const anchor = c.anchor && c.anchor.map ? `<div class="meta">${c.anchor.map}${c.anchor.half ? ` • ${c.anchor.half}` : ''}${c.anchor.round_start ? ` • R${c.anchor.round_start}${c.anchor.round_end ? `-R${c.anchor.round_end}` : ''}` : ''}</div>` : '';
+    return `<div class="comment ${c.collapsedByDefault ? 'collapsed' : ''}">${c.auto_hidden ? '<div class="meta">Auto-hidden by threshold</div>' : ''}<div><strong>u/${author.username}</strong> <span class="badge ${author.role}">${author.role}</span> ▲${c.score}</div>${anchor}<div>${c.body}</div>${commentTree(comments, c.id)}</div>`;
   }).join('');
 }
 
@@ -121,6 +139,26 @@ function bindThreadActions() {
     await request(`/mod/thread/${btn.dataset.modPin}/pin`, { method: 'POST' });
     await loadHome();
   }));
+  document.querySelectorAll('[data-save-thread]').forEach((btn) => btn.addEventListener('click', () => {
+    const id = btn.dataset.saveThread;
+    if (savedThreads.has(id)) savedThreads.delete(id); else savedThreads.add(id);
+    localStorage.setItem('savedThreads', JSON.stringify(Array.from(savedThreads)));
+    renderHome();
+  }));
+}
+
+
+function highlightThreadSelection() {
+  const rows = Array.from(document.querySelectorAll('.thread-row'));
+  rows.forEach((row, index) => row.classList.toggle('selected', index === selectedThreadIndex));
+}
+
+function moveSelection(dir) {
+  const rows = Array.from(document.querySelectorAll('.thread-row'));
+  if (!rows.length) return;
+  selectedThreadIndex = Math.max(0, Math.min(rows.length - 1, selectedThreadIndex + dir));
+  highlightThreadSelection();
+  rows[selectedThreadIndex].scrollIntoView({ block: 'nearest' });
 }
 
 async function loadHome() {
@@ -191,7 +229,8 @@ threadForm.addEventListener('submit', async (e) => {
         body: document.getElementById('threadBody').value,
         context_type: document.getElementById('contextType').value,
         context_id: document.getElementById('contextId').value,
-        tags: document.getElementById('threadTags').value.split(',').map((tag) => tag.trim()).filter(Boolean)
+        tags: document.getElementById('threadTags').value.split(',').map((tag) => tag.trim()).filter(Boolean),
+        thread_type: document.getElementById('threadType').value
       })
     });
     threadModal.close();
@@ -202,6 +241,11 @@ threadForm.addEventListener('submit', async (e) => {
 });
 
 window.addEventListener('hashchange', route);
+window.addEventListener('keydown', (event) => {
+  if (event.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)) return;
+  if (event.key === 'j') moveSelection(1);
+  if (event.key === 'k') moveSelection(-1);
+});
 
 (async function init() {
   try {

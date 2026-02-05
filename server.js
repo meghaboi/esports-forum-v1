@@ -12,9 +12,20 @@ const MAX_COMMENT_DEPTH = 6;
 const COLLAPSE_DEFAULT_DEPTH = 3;
 const MIN_ACCOUNT_AGE_FOR_THREAD_MS = 1000 * 60 * 5;
 const THREAD_AUT0_LOCK_HOURS_POST_MATCH = 24;
+const OFFICIAL_THREAD_PIN_AFTER_LIVE_HOURS = 6;
 const RATE_LIMIT_WINDOW_MS = 1000 * 60;
 const RATE_LIMIT_POSTS_PER_WINDOW = 6;
 const BANNED_WORDS = ['slur-placeholder', 'spamlink'];
+const AUTO_HIDE_COMMENT_SCORE = -5;
+const SLOW_MODE_SECONDS = 30;
+const REPUTATION_TIERS = [
+  { name: 'Veteran', min: 650 },
+  { name: 'Analyst', min: 450 },
+  { name: 'Trusted', min: 200 },
+  { name: 'Regular', min: 40 },
+  { name: 'New', min: 0 }
+];
+const DB_ADAPTER = process.env.DB_ADAPTER || 'memory';
 
 const state = {
   users: [
@@ -24,9 +35,11 @@ const state = {
       passwordHash: hashPassword('adminpass'),
       role: 'admin',
       created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 60).toISOString(),
+      reputation_bonus: 40,
       is_banned: false,
       is_shadowbanned: false,
-      ban_expires_at: null
+      ban_expires_at: null,
+      preferences: { favorite_teams: ['t-sen'], regions: ['NA'], muted_teams: [], muted_events: [] }
     },
     {
       id: 'u-mod',
@@ -34,9 +47,11 @@ const state = {
       passwordHash: hashPassword('modpass'),
       role: 'moderator',
       created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString(),
+      reputation_bonus: 10,
       is_banned: false,
       is_shadowbanned: false,
-      ban_expires_at: null
+      ban_expires_at: null,
+      preferences: { favorite_teams: [], regions: ['EMEA'], muted_teams: [], muted_events: [] }
     },
     {
       id: 'u-analyst',
@@ -44,9 +59,11 @@ const state = {
       passwordHash: hashPassword('analystpass'),
       role: 'verified_analyst',
       created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 12).toISOString(),
+      reputation_bonus: 80,
       is_banned: false,
       is_shadowbanned: false,
-      ban_expires_at: null
+      ban_expires_at: null,
+      preferences: { favorite_teams: ['t-prx'], regions: ['APAC'], muted_teams: [], muted_events: [] }
     },
     {
       id: 'u-1',
@@ -54,9 +71,11 @@ const state = {
       passwordHash: hashPassword('pass123'),
       role: 'user',
       created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 9).toISOString(),
+      reputation_bonus: 0,
       is_banned: false,
       is_shadowbanned: false,
-      ban_expires_at: null
+      ban_expires_at: null,
+      preferences: { favorite_teams: ['t-sen'], regions: ['NA'], muted_teams: [], muted_events: [] }
     }
   ],
   featuredPosts: [
@@ -99,6 +118,8 @@ const state = {
       updated_at: null,
       is_locked: false,
       is_pinned: false,
+      is_official: false,
+      thread_type: 'discussion',
       flair_override: null,
       deleted_at: null
     }
@@ -112,13 +133,18 @@ const state = {
       author_id: 'u-analyst',
       body: 'Timeouts were fine, the real issue was ult economy into round 21.',
       created_at: new Date(Date.now() - 1000 * 60 * 110).toISOString(),
+      anchor: { map: 'Ascent', half: 'Attack', round_start: 19, round_end: 21 },
       deleted_at: null
     }
   ],
   votes: [],
+  analystEndorsements: [],
   moderationLog: [],
+  reports: [],
+  threadCooldowns: [],
   revokedTokens: new Set(),
-  rateLimits: new Map()
+  rateLimits: new Map(),
+  requestMetrics: { total: 0, byRoute: {}, lastSlow: [] }
 };
 
 function hashPassword(password) {
@@ -153,14 +179,18 @@ function verifyToken(token) {
 }
 
 function publicUser(user) {
+  const reputation = reputationForUser(user.id);
   return {
     id: user.id,
     username: user.username,
     role: user.role,
     created_at: user.created_at,
     karma_score: karmaForUser(user.id),
+    reputation_score: reputation,
+    reputation_tier: tierForReputation(reputation),
     is_banned: user.is_banned,
-    is_shadowbanned: user.is_shadowbanned
+    is_shadowbanned: user.is_shadowbanned,
+    preferences: user.preferences || { favorite_teams: [], regions: [], muted_teams: [], muted_events: [] }
   };
 }
 
@@ -257,6 +287,94 @@ function karmaForUser(userId) {
   return threadIds.reduce((sum, id) => sum + scoreFor('thread', id), 0) + commentIds.reduce((sum, id) => sum + scoreFor('comment', id), 0);
 }
 
+function tierForReputation(score) {
+  return REPUTATION_TIERS.find((tier) => score >= tier.min)?.name || 'New';
+}
+
+function reputationForUser(userId) {
+  const user = state.users.find((item) => item.id === userId);
+  const threadScore = state.threads.filter((thread) => thread.author_id === userId).reduce((sum, thread) => sum + scoreFor('thread', thread.id), 0);
+  const commentScore = state.comments.filter((comment) => comment.author_id === userId).reduce((sum, comment) => sum + scoreFor('comment', comment.id), 0);
+  const liveAccuracy = state.comments.filter((comment) => comment.author_id === userId && isLiveMatchThread(comment.thread_id)).reduce((sum, comment) => sum + Math.max(scoreFor('comment', comment.id), 0), 0);
+  const endorsements = state.analystEndorsements.filter((item) => item.user_id === userId).length * 25;
+  return threadScore + commentScore + liveAccuracy + endorsements + (user?.reputation_bonus || 0);
+}
+
+function hasSummaryPrivileges(user) {
+  if (!user) return false;
+  if (canModerate(user) || user.role === 'admin' || user.role === 'verified_analyst') return true;
+  return reputationForUser(user.id) >= 200;
+}
+
+function isLiveMatchThread(threadId) {
+  const thread = state.threads.find((item) => item.id === threadId);
+  if (!thread || thread.context_type !== 'match') return false;
+  const match = state.matches.find((item) => item.id === thread.context_id);
+  return !!match && match.status === 'LIVE';
+}
+
+function threadWeight(thread) {
+  const authorRep = reputationForUser(thread.author_id);
+  return 1 + Math.min(authorRep / 500, 0.6);
+}
+
+function isOfficialThreadPinned(match) {
+  if (!match.startTime) return false;
+  const cutoff = new Date(match.startTime).getTime() + OFFICIAL_THREAD_PIN_AFTER_LIVE_HOURS * 3600000;
+  return match.status === 'LIVE' || Date.now() <= cutoff;
+}
+
+function ensureOfficialMatchThreads() {
+  state.matches.forEach((match) => {
+    if (match.officialThreadId) return;
+    const thread = {
+      id: nextId('th', state.threads),
+      title: `Official Match Thread: ${match.teams[0].short} vs ${match.teams[1].short}`,
+      body: `Auto-created official thread for ${match.event}. Use timeline anchors to track key rounds.`,
+      context_type: 'match',
+      context_id: match.id,
+      tags: ['official', 'live'],
+      author_id: 'u-admin',
+      created_at: new Date().toISOString(),
+      updated_at: null,
+      is_locked: false,
+      is_pinned: isOfficialThreadPinned(match),
+      is_official: true,
+      thread_type: 'official_match',
+      flair_override: 'Official',
+      deleted_at: null
+    };
+    state.threads.push(thread);
+    match.officialThreadId = thread.id;
+  });
+}
+
+function applyThreadLifecycleRules() {
+  state.matches.forEach((match) => {
+    const official = state.threads.find((thread) => thread.id === match.officialThreadId);
+    if (!official) return;
+    official.is_pinned = isOfficialThreadPinned(match);
+    const lockThreshold = new Date(match.startTime).getTime() + THREAD_AUT0_LOCK_HOURS_POST_MATCH * 3600000;
+    if (Date.now() > lockThreshold) official.is_locked = true;
+  });
+}
+
+function routeMetricKey(pathname) {
+  if (/^\/threads\/[^/]+$/.test(pathname)) return '/threads/:id';
+  if (/^\/threads\/[^/]+\/comments$/.test(pathname)) return '/threads/:id/comments';
+  if (/^\/matches\/[^/]+$/.test(pathname)) return '/matches/:id';
+  return pathname;
+}
+
+function logModAction(actor, action, detail) {
+  state.moderationLog.push({ id: nextId('mod', state.moderationLog), actor_id: actor.id, action, detail, created_at: new Date().toISOString() });
+}
+
+function isInCooldown(threadId) {
+  const cooldown = state.threadCooldowns.find((item) => item.thread_id === threadId && new Date(item.until).getTime() > Date.now());
+  return cooldown || null;
+}
+
 function withAuthor(entity) {
   const author = state.users.find((u) => u.id === entity.author_id);
   return {
@@ -287,8 +405,9 @@ function rankedThreads(feed, rangeHours, viewer) {
     if (shouldAutoLock(thread)) thread.is_locked = true;
     const score = scoreFor('thread', thread.id);
     const ageHours = Math.max((now - new Date(thread.created_at).getTime()) / 3600000, 0.01);
-    const rank = score / Math.pow(ageHours + 2, 1.3);
-    return { ...withAuthor(thread), score, rank };
+    const weightedScore = score * threadWeight(thread);
+    const rank = weightedScore / Math.pow(ageHours + 2, 1.3);
+    return { ...withAuthor(thread), score, weightedScore, rank, heat: Number((rank * 100).toFixed(2)) };
   });
 
   let filtered = base;
@@ -305,9 +424,13 @@ function rankedThreads(feed, rangeHours, viewer) {
 }
 
 const server = http.createServer(async (req, res) => {
+  const requestStart = Date.now();
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
   const viewer = getUserFromReq(req);
+  state.requestMetrics.total += 1;
+  const routeKey = routeMetricKey(pathname);
+  state.requestMetrics.byRoute[routeKey] = (state.requestMetrics.byRoute[routeKey] || 0) + 1;
 
   if (pathname === '/auth/register' && req.method === 'POST') {
     try {
@@ -321,9 +444,11 @@ const server = http.createServer(async (req, res) => {
         passwordHash: hashPassword(password),
         role: 'user',
         created_at: new Date().toISOString(),
+        reputation_bonus: 0,
         is_banned: false,
         is_shadowbanned: false,
-        ban_expires_at: null
+        ban_expires_at: null,
+        preferences: { favorite_teams: [], regions: [], muted_teams: [], muted_events: [] }
       };
       state.users.push(user);
       return writeJson(res, 201, { user: publicUser(user) });
@@ -357,8 +482,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/home' && req.method === 'GET') {
+    ensureOfficialMatchThreads();
+    applyThreadLifecycleRules();
     const feed = rankedThreads('hot', null, viewer).slice(0, 20);
-    return writeJson(res, 200, { refreshedAt: new Date().toISOString(), matchPulse: state.matches, featuredPosts: state.featuredPosts, threads: feed });
+    const prefs = viewer?.preferences || { favorite_teams: [], regions: [], muted_teams: [], muted_events: [] };
+    const matchPulse = state.matches.filter((match) => !prefs.muted_events.includes(match.event) && !match.teams.some((team) => prefs.muted_teams.includes(team.id)));
+    const summaries = state.threads
+      .filter((thread) => thread.thread_type === 'match_summary' && visibleThread(thread, viewer))
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+      .slice(0, 5)
+      .map((thread) => ({ ...withAuthor(thread), score: scoreFor('thread', thread.id) }));
+    return writeJson(res, 200, { refreshedAt: new Date().toISOString(), db_adapter: DB_ADAPTER, matchPulse, featuredPosts: state.featuredPosts, summaries, threads: feed });
   }
 
   if (pathname === '/threads' && req.method === 'GET') {
@@ -376,9 +510,11 @@ const server = http.createServer(async (req, res) => {
       return writeJson(res, 403, { error: 'account age too low for thread creation' });
     }
     try {
-      const { title, body, context_type, context_id, tags = [] } = await parseBody(req);
+      const { title, body, context_type, context_id, tags = [], thread_type = 'discussion' } = await parseBody(req);
       if (!title || !body || !context_type || !context_id) return writeJson(res, 400, { error: 'missing required fields' });
       if (!['match', 'team', 'event', 'patch'].includes(context_type)) return writeJson(res, 400, { error: 'invalid context_type' });
+      if (!['discussion', 'match_summary'].includes(thread_type)) return writeJson(res, 400, { error: 'invalid thread_type' });
+      if (thread_type === 'match_summary' && !hasSummaryPrivileges(viewer)) return writeJson(res, 403, { error: 'match summaries require analyst/trusted role' });
       if (containsBlockedWords(`${title} ${body}`)) return writeJson(res, 400, { error: 'content blocked by word filter' });
       const thread = {
         id: nextId('th', state.threads),
@@ -392,7 +528,9 @@ const server = http.createServer(async (req, res) => {
         updated_at: null,
         is_locked: false,
         is_pinned: false,
-        flair_override: null,
+        is_official: false,
+        thread_type,
+        flair_override: thread_type === 'match_summary' ? 'Summary' : null,
         deleted_at: null
       };
       state.threads.push(thread);
@@ -425,6 +563,7 @@ const server = http.createServer(async (req, res) => {
     const thread = state.threads.find((item) => item.id === threadEditMatch[1]);
     if (!thread) return writeJson(res, 404, { error: 'thread not found' });
     thread.deleted_at = new Date().toISOString();
+    logModAction(viewer, 'thread_soft_delete', { thread_id: thread.id });
     return writeJson(res, 200, { ok: true, soft_deleted: true });
   }
 
@@ -435,7 +574,7 @@ const server = http.createServer(async (req, res) => {
     if (!thread) return writeJson(res, 404, { error: 'thread not found' });
     const comments = state.comments
       .filter((comment) => comment.thread_id === threadId && !comment.deleted_at)
-      .map((comment) => ({ ...withAuthor(comment), score: scoreFor('comment', comment.id), collapsedByDefault: comment.depth > COLLAPSE_DEFAULT_DEPTH }))
+      .map((comment) => ({ ...withAuthor(comment), score: scoreFor('comment', comment.id), collapsedByDefault: comment.depth > COLLAPSE_DEFAULT_DEPTH, auto_hidden: scoreFor('comment', comment.id) <= AUTO_HIDE_COMMENT_SCORE }))
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     return writeJson(res, 200, { comments, maxDepth: MAX_COMMENT_DEPTH, collapseAfterDepth: COLLAPSE_DEFAULT_DEPTH });
   }
@@ -448,8 +587,11 @@ const server = http.createServer(async (req, res) => {
     const thread = state.threads.find((item) => item.id === threadId && !item.deleted_at);
     if (!thread) return writeJson(res, 404, { error: 'thread not found' });
     if (thread.is_locked) return writeJson(res, 403, { error: 'thread is locked' });
+    const cooldown = isInCooldown(threadId);
+    const ownRecent = state.comments.find((item) => item.thread_id === threadId && item.author_id === viewer.id && new Date(item.created_at).getTime() > Date.now() - SLOW_MODE_SECONDS * 1000);
+    if (cooldown && ownRecent) return writeJson(res, 429, { error: `slow mode active (${SLOW_MODE_SECONDS}s)` });
     try {
-      const { body, parent_id = null } = await parseBody(req);
+      const { body, parent_id = null, anchor = null } = await parseBody(req);
       if (!body) return writeJson(res, 400, { error: 'body required' });
       if (containsBlockedWords(body)) return writeJson(res, 400, { error: 'content blocked by word filter' });
       let depth = 0;
@@ -467,6 +609,12 @@ const server = http.createServer(async (req, res) => {
         author_id: viewer.id,
         body,
         created_at: new Date().toISOString(),
+        anchor: anchor && typeof anchor === 'object' ? {
+          map: anchor.map || null,
+          half: anchor.half || null,
+          round_start: Number(anchor.round_start) || null,
+          round_end: Number(anchor.round_end) || null
+        } : null,
         deleted_at: null
       };
       state.comments.push(comment);
@@ -537,6 +685,7 @@ const server = http.createServer(async (req, res) => {
     const thread = state.threads.find((item) => item.id === modLock[1]);
     if (!thread) return writeJson(res, 404, { error: 'thread not found' });
     thread.is_locked = !thread.is_locked;
+    logModAction(viewer, 'thread_lock_toggle', { thread_id: thread.id, is_locked: thread.is_locked });
     return writeJson(res, 200, { ok: true, is_locked: thread.is_locked });
   }
 
@@ -546,6 +695,7 @@ const server = http.createServer(async (req, res) => {
     const thread = state.threads.find((item) => item.id === modPin[1]);
     if (!thread) return writeJson(res, 404, { error: 'thread not found' });
     thread.is_pinned = !thread.is_pinned;
+    logModAction(viewer, 'thread_pin_toggle', { thread_id: thread.id, is_pinned: thread.is_pinned });
     return writeJson(res, 200, { ok: true, is_pinned: thread.is_pinned });
   }
 
@@ -558,6 +708,7 @@ const server = http.createServer(async (req, res) => {
       const { duration_hours } = await parseBody(req);
       user.is_banned = true;
       user.ban_expires_at = duration_hours ? new Date(Date.now() + duration_hours * 3600000).toISOString() : null;
+      logModAction(viewer, 'user_ban', { user_id: user.id, duration_hours: duration_hours || null });
       return writeJson(res, 200, { ok: true, user: publicUser(user) });
     } catch {
       return writeJson(res, 400, { error: 'invalid request body' });
@@ -570,6 +721,7 @@ const server = http.createServer(async (req, res) => {
     const user = state.users.find((item) => item.id === modShadow[1]);
     if (!user) return writeJson(res, 404, { error: 'user not found' });
     user.is_shadowbanned = !user.is_shadowbanned;
+    logModAction(viewer, 'user_shadowban_toggle', { user_id: user.id, is_shadowbanned: user.is_shadowbanned });
     return writeJson(res, 200, { ok: true, user: publicUser(user) });
   }
 
@@ -620,8 +772,81 @@ const server = http.createServer(async (req, res) => {
     if (!thread || !visibleThread(thread, viewer)) return writeJson(res, 404, { error: 'thread not found' });
     const comments = state.comments
       .filter((comment) => comment.thread_id === thread.id && !comment.deleted_at)
-      .map((comment) => ({ ...withAuthor(comment), score: scoreFor('comment', comment.id), collapsedByDefault: comment.depth > COLLAPSE_DEFAULT_DEPTH }));
+      .map((comment) => ({ ...withAuthor(comment), score: scoreFor('comment', comment.id), collapsedByDefault: comment.depth > COLLAPSE_DEFAULT_DEPTH, auto_hidden: scoreFor('comment', comment.id) <= AUTO_HIDE_COMMENT_SCORE }));
     return writeJson(res, 200, { thread: { ...withAuthor(thread), score: scoreFor('thread', thread.id) }, comments });
+  }
+
+
+  if (pathname === '/search' && req.method === 'GET') {
+    const q = (url.searchParams.get('q') || '').toLowerCase();
+    const map = url.searchParams.get('map');
+    const agent = url.searchParams.get('agent');
+    const patch = url.searchParams.get('patch');
+    const results = state.threads
+      .filter((thread) => visibleThread(thread, viewer))
+      .map((thread) => {
+        const rep = reputationForUser(thread.author_id);
+        const score = scoreFor('thread', thread.id);
+        const recency = 1 / Math.max((Date.now() - new Date(thread.created_at).getTime()) / 3600000, 1);
+        const blob = `${thread.title} ${thread.body} ${(thread.tags || []).join(' ')}`.toLowerCase();
+        const queryHit = !q || blob.includes(q);
+        const mapHit = !map || blob.includes(map.toLowerCase());
+        const agentHit = !agent || blob.includes(agent.toLowerCase());
+        const patchHit = !patch || blob.includes(patch.toLowerCase());
+        return { thread: { ...withAuthor(thread), score }, rank: rep * 0.4 + score * 3 + recency * 12, include: queryHit && mapHit && agentHit && patchHit };
+      })
+      .filter((item) => item.include)
+      .sort((a, b) => b.rank - a.rank)
+      .slice(0, 25);
+    return writeJson(res, 200, { results: results.map((item) => item.thread) });
+  }
+
+  if (pathname === '/me/preferences' && req.method === 'PUT') {
+    if (!viewer) return writeJson(res, 401, { error: 'unauthorized' });
+    try {
+      const { favorite_teams = [], regions = [], muted_teams = [], muted_events = [] } = await parseBody(req);
+      viewer.preferences = { favorite_teams, regions, muted_teams, muted_events };
+      return writeJson(res, 200, { ok: true, preferences: viewer.preferences });
+    } catch {
+      return writeJson(res, 400, { error: 'invalid request body' });
+    }
+  }
+
+  if (pathname === '/mod/log' && req.method === 'GET') {
+    if (!viewer || !canModerate(viewer)) return writeJson(res, 403, { error: 'moderator required' });
+    return writeJson(res, 200, { actions: state.moderationLog.slice(-100).reverse() });
+  }
+
+  const reportMatch = pathname.match(/^\/comments\/([^/]+)\/report$/);
+  if (reportMatch && req.method === 'POST') {
+    if (!viewer) return writeJson(res, 401, { error: 'unauthorized' });
+    const comment = state.comments.find((item) => item.id === reportMatch[1] && !item.deleted_at);
+    if (!comment) return writeJson(res, 404, { error: 'comment not found' });
+    try {
+      const { reason = 'unspecified' } = await parseBody(req);
+      const weight = Math.max(1, Math.floor(reputationForUser(viewer.id) / 50));
+      state.reports.push({ id: nextId('rep', state.reports), comment_id: comment.id, reporter_id: viewer.id, reason, weight, created_at: new Date().toISOString() });
+      return writeJson(res, 201, { ok: true });
+    } catch {
+      return writeJson(res, 400, { error: 'invalid request body' });
+    }
+  }
+
+  const cooldownMatch = pathname.match(/^\/mod\/thread\/([^/]+)\/cooldown$/);
+  if (cooldownMatch && req.method === 'POST') {
+    if (!viewer || !canModerate(viewer)) return writeJson(res, 403, { error: 'moderator required' });
+    const thread = state.threads.find((item) => item.id === cooldownMatch[1]);
+    if (!thread) return writeJson(res, 404, { error: 'thread not found' });
+    const until = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    state.threadCooldowns = state.threadCooldowns.filter((item) => item.thread_id !== thread.id);
+    state.threadCooldowns.push({ thread_id: thread.id, until, seconds_between_posts: SLOW_MODE_SECONDS });
+    logModAction(viewer, 'thread_cooldown_enabled', { thread_id: thread.id, until });
+    return writeJson(res, 200, { ok: true, until, seconds_between_posts: SLOW_MODE_SECONDS });
+  }
+
+  if (pathname === '/system/metrics' && req.method === 'GET') {
+    if (!viewer || !canModerate(viewer)) return writeJson(res, 403, { error: 'moderator required' });
+    return writeJson(res, 200, { request_metrics: state.requestMetrics, moderation_actions: state.moderationLog.length, deletion_reasons: state.reports.reduce((acc, item) => { acc[item.reason] = (acc[item.reason] || 0) + 1; return acc; }, {}) });
   }
 
   const sanitizedPath = pathname === '/' ? '/index.html' : pathname;

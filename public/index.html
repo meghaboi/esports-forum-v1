@@ -8,14 +8,54 @@
 </head>
 <body>
   <div id="app">
-    <div class="toolbar">
+    <header class="toolbar">
       <strong>Valorant Forum</strong>
-      <button id="refreshBtn">Manual Refresh</button>
+      <div class="grow"></div>
+      <span id="identity" class="muted">Guest</span>
+      <button id="authBtn">Login / Register</button>
+      <button id="logoutBtn" class="hidden">Logout</button>
+      <button id="refreshBtn">Refresh</button>
       <small id="refreshTime" class="muted"></small>
-    </div>
+    </header>
     <div id="pulseBar" class="pulse-bar"></div>
-    <div id="view"></div>
+    <main id="view"></main>
+    <button id="newThreadBtn" class="floating hidden">＋ New Thread</button>
   </div>
+
+  <dialog id="authModal">
+    <form method="dialog" id="authForm" class="modal-form">
+      <h3 id="authTitle">Login</h3>
+      <label>Username <input id="authUsername" required /></label>
+      <label>Password <input id="authPassword" type="password" required /></label>
+      <div class="row">
+        <button value="cancel">Cancel</button>
+        <button id="switchAuth" type="button">Need account?</button>
+        <button id="submitAuth" type="submit">Continue</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="threadModal">
+    <form method="dialog" id="threadForm" class="modal-form">
+      <h3>New Thread</h3>
+      <label>Title <input id="threadTitle" required /></label>
+      <label>Context Type
+        <select id="contextType">
+          <option value="match">match</option><option value="team">team</option><option value="event">event</option><option value="patch">patch</option>
+        </select>
+      </label>
+      <label>Context ID <input id="contextId" placeholder="m-100" required /></label>
+      <label>Tags (comma separated) <input id="threadTags" /></label>
+      <label>Body <textarea id="threadBody" rows="6" required></textarea></label>
+      <button type="button" id="togglePreview">Markdown Preview</button>
+      <div id="preview" class="section hidden"></div>
+      <div class="row">
+        <button value="cancel">Cancel</button>
+        <button type="submit">Post Thread</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="/main.js"></script>
 </body>
 </html>

@@ -45,6 +45,11 @@
         </select>
       </label>
       <label>Context ID <input id="contextId" placeholder="m-100" required /></label>
+      <label>Post Type
+        <select id="threadType">
+          <option value="discussion">discussion</option><option value="match_summary">match_summary</option>
+        </select>
+      </label>
       <label>Tags (comma separated) <input id="threadTags" /></label>
       <label>Body <textarea id="threadBody" rows="6" required></textarea></label>
       <button type="button" id="togglePreview">Markdown Preview</button>

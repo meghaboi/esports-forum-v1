@@ -15,9 +15,9 @@ const config: Config = {
         foreground: "#e6edf3",
         muted: "#9aa4af",
         accent: {
-          green: "#22c55e",
+          green: "#00ff85",
           red: "#ff4655",
-          yellow: "#eab308",
+          yellow: "#ffb000",
         },
       },
     },

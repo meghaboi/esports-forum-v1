@@ -1,36 +1,64 @@
 import { Button } from "@/components/ui/Button";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/Card";
+import { Badge } from "@/components/ui/Badge";
+import { Container } from "@/components/ui/Container";
 
 export default function Home() {
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center p-24 bg-background text-foreground">
-      <div className="z-10 max-w-5xl w-full items-center justify-between font-mono text-sm lg:flex flex-col gap-8">
-        <h1 className="text-4xl font-bold text-center">Valorant Forum Foundation</h1>
-        <p className="text-muted text-center max-w-2xl">
-          Welcome to the foundational setup for the Valorant match-centric forum. 
-          Built with Next.js 14, TypeScript, Tailwind CSS, Prisma, and JWT Auth.
-        </p>
-        
-        <div className="flex gap-4">
-          <Button variant="primary">Primary Action</Button>
-          <Button variant="secondary">Secondary Action</Button>
-          <Button variant="outline">Outline</Button>
-        </div>
+    <main className="min-h-screen py-24 bg-background text-foreground">
+      <Container>
+        <div className="z-10 w-full items-center justify-between font-mono text-sm flex flex-col gap-8">
+          <h1 className="text-4xl font-bold text-center">Valorant Forum Foundation</h1>
+          <p className="text-muted text-center max-w-2xl">
+            Welcome to the foundational setup for the Valorant match-centric forum. 
+            Built with Next.js 14, TypeScript, Tailwind CSS, Prisma, and JWT Auth.
+          </p>
+          
+          <div className="flex gap-4">
+            <Button variant="primary">Register</Button>
+            <Button variant="outline">Login</Button>
+          </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 w-full mt-8">
-          <div className="p-6 bg-surface border border-border rounded-none">
-            <h3 className="text-accent-green font-bold mb-2">LIVE / WON</h3>
-            <p className="text-sm text-muted">Example of live match or won status color.</p>
-          </div>
-          <div className="p-6 bg-surface border border-border rounded-none">
-            <h3 className="text-accent-red font-bold mb-2">HOT / UPSETS</h3>
-            <p className="text-sm text-muted">Example of trending or upset status color.</p>
-          </div>
-          <div className="p-6 bg-surface border border-border rounded-none">
-            <h3 className="text-accent-yellow font-bold mb-2">ONGOING</h3>
-            <p className="text-sm text-muted">Example of ongoing match status color.</p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 w-full mt-8">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center justify-between">
+                  Live Match
+                  <Badge variant="success">LIVE</Badge>
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted">Example of a live match card using the flat UI design.</p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center justify-between">
+                  Hot Topic
+                  <Badge variant="danger">HOT</Badge>
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted">Example of a trending or upset status card.</p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center justify-between">
+                  Tournament
+                  <Badge variant="warning">ONGOING</Badge>
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted">Example of an ongoing tournament status card.</p>
+              </CardContent>
+            </Card>
           </div>
         </div>
-      </div>
+      </Container>
     </main>
   );
 }
+
